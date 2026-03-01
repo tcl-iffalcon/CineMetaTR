@@ -84,3 +84,10 @@ builder.defineMetaHandler(async ({ type, id }) => {
 const port = process.env.PORT || 7000;
 serveHTTP(builder.getInterface(), { port });
 console.log(`🇹🇷 TR Dub Addon çalışıyor: http://localhost:${port}`);
+
+// Başlangıçta Sinewix kataloglarını arka planda yükle
+const { preloadSinewix } = require('./lib/dubChecker');
+setTimeout(() => {
+  console.log('[Sinewix] Kataloglar arka planda yükleniyor...');
+  preloadSinewix();
+}, 3000);

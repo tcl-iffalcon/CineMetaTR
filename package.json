@@ -1,7 +1,7 @@
 {
-  "name": "cinemetatr",
+  "name": "tr-dub-addon",
   "version": "1.0.0",
-  "description": "Stremio ve Nuvio'da Türkçe Dublaj Olan İçeriklere Türk Bayrağı Ekler.",
+  "description": "Stremio eklentisi - Türkçe dublaj olan içeriklere bayrak ekler",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
