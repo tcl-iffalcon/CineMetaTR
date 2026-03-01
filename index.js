@@ -5,9 +5,9 @@ const cache = require('./lib/cache');
 
 const manifest = {
   id: 'org.trdub.addon',
-  version: '1.0.0',
-  name: '🇹🇷 Türkçe Dublaj',
-  description: 'Cinemeta katalogunda Türkçe dublaj olan içeriklere 🇹🇷 bayrağı ekler.',
+  "name": "dublajtr",
+  "version": "1.0.0",
+  "description": "Stremio ve Nuvio'da Sinewix eklentisinde Türkçe dublaj olan içeriklere bayrak ekler.",
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Flag_of_Turkey.svg/320px-Flag_of_Turkey.svg.png',
   resources: ['catalog', 'meta'],
   types: ['movie', 'series'],
@@ -45,14 +45,21 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   // Her içerik için Türkçe dublaj kontrolü yap (paralel, batch halinde)
   const results = await Promise.all(
     metas.map(async (meta) => {
-      const hasTrDub = await checkTurkishDub(meta.id, type);
+      // Poster eksikse Cinemeta meta endpoint'inden al
+      let finalMeta = meta;
+      if (!meta.poster && meta.id) {
+        const fullMeta = await fetchMeta(cinemetaType, meta.id);
+        if (fullMeta) finalMeta = { ...fullMeta, ...meta, poster: fullMeta.poster };
+      }
+
+      const hasTrDub = await checkTurkishDub(finalMeta.id, type);
       if (hasTrDub) {
         return {
-          ...meta,
-          name: `🇹🇷 ${meta.name}`,
+          ...finalMeta,
+          name: `🇹🇷 ${finalMeta.name}`,
         };
       }
-      return meta;
+      return finalMeta;
     })
   );
 
