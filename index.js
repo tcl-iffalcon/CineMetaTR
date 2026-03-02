@@ -5,9 +5,9 @@ const cache = require('./lib/cache');
 
 const manifest = {
   id: 'org.trdub.addon',
-  "name": "dublajtr",
-  "version": "1.0.0",
-  "description": "Stremio ve Nuvio'da Sinewix eklentisinde Türkçe dublaj olan içeriklere bayrak ekler.",
+  name: 'dublajtr',
+  version: '1.0.0',
+  description: 'Sinewix\'te Türkçe dublaj olan içerikleri 🇹🇷 bayrağıyla listeler.',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Flag_of_Turkey.svg/320px-Flag_of_Turkey.svg.png',
   resources: ['catalog', 'meta'],
   types: ['movie', 'series'],
@@ -30,45 +30,42 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// CATALOG handler
+// CATALOG handler — sadece Sinewix'te olan içerikleri göster
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   const skip = parseInt(extra?.skip) || 0;
   const cacheKey = `catalog:${type}:${skip}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  // Cinemeta'dan katalog çek
-  const cinemetaType = type === 'movie' ? 'movie' : 'series';
-  const cinemetaCatalogId = type === 'movie' ? 'top' : 'top';
-  const metas = await fetchCatalog(cinemetaType, cinemetaCatalogId, skip);
+  const metas = await fetchCatalog(type, 'top', skip);
 
-  // Her içerik için Türkçe dublaj kontrolü yap (paralel, batch halinde)
   const results = await Promise.all(
     metas.map(async (meta) => {
-      // Poster eksikse Cinemeta meta endpoint'inden al
+      // Poster eksikse Cinemeta meta endpoint'inden tamamla
       let finalMeta = meta;
       if (!meta.poster && meta.id) {
-        const fullMeta = await fetchMeta(cinemetaType, meta.id);
+        const fullMeta = await fetchMeta(type, meta.id);
         if (fullMeta) finalMeta = { ...fullMeta, ...meta, poster: fullMeta.poster };
       }
 
       const hasTrDub = await checkTurkishDub(finalMeta.id, type);
-      if (hasTrDub) {
-        return {
-          ...finalMeta,
-          name: `🇹🇷 ${finalMeta.name}`,
-        };
-      }
-      return finalMeta;
+      if (!hasTrDub) return null; // Sinewix'te yoksa kataloğa ekleme
+
+      return {
+        ...finalMeta,
+        name: `🇹🇷 ${finalMeta.name}`,
+      };
     })
   );
 
-  const response = { metas: results };
-  cache.set(cacheKey, response, 60 * 60 * 6); // 6 saat cache
+  // null olanları filtrele (Sinewix'te olmayan içerikler)
+  const filtered = results.filter(Boolean);
+  const response = { metas: filtered };
+  cache.set(cacheKey, response, 60 * 60 * 6); // 6 saat
   return response;
 });
 
-// META handler
+// META handler — içerik detay sayfasında bayrağı göster
 builder.defineMetaHandler(async ({ type, id }) => {
   const cacheKey = `meta:${type}:${id}`;
   const cached = cache.get(cacheKey);
@@ -84,7 +81,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
   }
 
   const response = { meta };
-  cache.set(cacheKey, response, 60 * 60 * 12); // 12 saat cache
+  cache.set(cacheKey, response, 60 * 60 * 12); // 12 saat
   return response;
 });
 
