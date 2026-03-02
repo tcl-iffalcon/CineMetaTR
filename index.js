@@ -5,10 +5,10 @@ const cache = require('./lib/cache');
 
 const manifest = {
   id: 'org.trdub.addon',
-  "name": "dublajtr",
-  "version": "1.0.0",
-  "description": "Stremio ve Nuvio'da Sinewix eklentisinde Türkçe dublaj olan içeriklere bayrak ekler.",
-  logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Flag_of_Turkey.svg/320px-Flag_of_Turkey.svg.png',
+  "name": "DublajTR",
+  "version": "1.1.0",
+  "description": "Nuvio'da Sinewix eklentisinde Türkçe dublaj seçeneği olan içeriklere bayrak ekler.",
+  logo: 'hhttps://github.com/tcl-iffalcon/CineMetaTR/blob/main/logo.png',
   resources: ['catalog', 'meta'],
   types: ['movie', 'series'],
   catalogs: [

@@ -1,7 +1,7 @@
 {
-  "name": "dublajtr",
-  "version": "1.0.0",
-  "description": "Stremio ve Nuvio'da Sinewix eklentisinde Türkçe dublaj olan içeriklere bayrak ekler.",
+  "name": "DublajTR",
+  "version": "1.1.0",
+  "description": "Nuvio'da Sinewix eklentisinde Türkçe dublaj seçeneği olan içeriklere bayrak ekler.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
