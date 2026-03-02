@@ -7,7 +7,7 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 
 const manifest = {
   id: 'org.trdub.addon',
-  name: 'dublajtr',
+  name: 'DublajTR',
   version: '1.2.0',
   description: "Sinewix'teki Türkçe dublaj içeriklere 🇹🇷 bayrağı ekler.",
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Flag_of_Turkey.svg/320px-Flag_of_Turkey.svg.png',
@@ -18,13 +18,13 @@ const manifest = {
       type: 'movie',
       id: 'tr-dub-sinewix-movies',
       name: '🇹🇷 Filmler (Türkçe Dublaj)',
-      extra: [{ name: 'skip' }],
+      extra: [{ name: 'skip' }, { name: 'search' }],
     },
     {
       type: 'series',
       id: 'tr-dub-sinewix-series',
       name: '🇹🇷 Diziler (Türkçe Dublaj)',
-      extra: [{ name: 'skip' }],
+      extra: [{ name: 'skip' }, { name: 'search' }],
     },
   ],
   idPrefixes: ['tt', 'sinewix'],
@@ -163,9 +163,49 @@ async function checkTurkishDub(name, type, year) {
   }
 }
 
+// Cinemeta'da arama yap
+async function searchCinemeta(type, query) {
+  try {
+    const url = `https://v3-cinemeta.strem.io/catalog/${type}/top/search=${encodeURIComponent(query)}.json`;
+    const res = await fetch(url, { timeout: 10000 });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.metas || [];
+  } catch (err) {
+    console.error('[Cinemeta] Search error:', err.message);
+    return [];
+  }
+}
+
 // CATALOG handler
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   const skip = parseInt(extra?.skip) || 0;
+  const searchQuery = extra?.search;
+
+  // ARAMA modu
+  if (searchQuery) {
+    const cacheKey = `search:${type}:${searchQuery}`;
+    const cached = cache.get(cacheKey);
+    if (cached) return cached;
+
+    const metas = await searchCinemeta(type, searchQuery);
+    if (!metas.length) return { metas: [] };
+
+    const results = await Promise.all(
+      metas.map(async (meta) => {
+        const year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
+        const hasTrDub = await checkTurkishDub(meta.name, type, year);
+        if (hasTrDub) return { ...meta, name: `🇹🇷 ${meta.name}` };
+        return meta;
+      })
+    );
+
+    const response = { metas: results };
+    cache.set(cacheKey, response, 60 * 60 * 3);
+    return response;
+  }
+
+  // KATALOG modu
   const cacheKey = `catalog:${type}:${skip}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
