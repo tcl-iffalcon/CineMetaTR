@@ -7,7 +7,7 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 
 const manifest = {
   id: 'org.trdub.addon',
-  name: 'DublajTR',
+  name: 'dublajtr',
   version: '1.2.0',
   description: "Sinewix'teki Türkçe dublaj içeriklere 🇹🇷 bayrağı ekler.",
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Flag_of_Turkey.svg/320px-Flag_of_Turkey.svg.png',
