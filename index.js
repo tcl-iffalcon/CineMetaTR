@@ -18,6 +18,7 @@ const manifest = {
       type: 'movie',
       id: 'tr-dub-sinewix-movies',
       name: '🇹🇷 Filmler (Türkçe Dublaj)',
+      pageSize: 24,
       extra: [
         { name: 'skip', isRequired: false },
         { name: 'search', isRequired: false },
@@ -27,6 +28,7 @@ const manifest = {
       type: 'series',
       id: 'tr-dub-sinewix-series',
       name: '🇹🇷 Diziler (Türkçe Dublaj)',
+      pageSize: 24,
       extra: [
         { name: 'skip', isRequired: false },
         { name: 'search', isRequired: false },
@@ -38,13 +40,14 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// Sinewix'ten tek sayfa içerik çek
-async function fetchSinewixPage(type, skip) {
+// Sinewix sayfa başına 12 öğe döndürüyor
+// Bu fonksiyon istenen skip'ten itibaren 2 sayfa çekip 24 öğe döndürür
+async function fetchSinewixPage(type, sinewixSkip) {
   const sinewixType = type === 'movie' ? 'movie' : 'series';
   const catalogId = type === 'movie' ? 'sinewix-movies' : 'sinewix-series';
-  const url = skip === 0
+  const url = sinewixSkip === 0
     ? `${SINEWIX_BASE}/catalog/${sinewixType}/${catalogId}.json`
-    : `${SINEWIX_BASE}/catalog/${sinewixType}/${catalogId}/skip=${skip}.json`;
+    : `${SINEWIX_BASE}/catalog/${sinewixType}/${catalogId}/skip=${sinewixSkip}.json`;
 
   console.log(`[Sinewix] Fetching: ${url}`);
 
@@ -59,12 +62,31 @@ async function fetchSinewixPage(type, skip) {
     }
     const data = await res.json();
     const metas = data.metas || [];
-    console.log(`[Sinewix] Got ${metas.length} items (skip=${skip})`);
+    console.log(`[Sinewix] Got ${metas.length} items (sinewixSkip=${sinewixSkip})`);
     return metas;
   } catch (err) {
-    console.error(`[Sinewix] Fetch error (${type}, skip=${skip}):`, err.message);
+    console.error(`[Sinewix] Fetch error (${type}, sinewixSkip=${sinewixSkip}):`, err.message);
     return [];
   }
+}
+
+// Nuvio pageSize=24 bekliyor, Sinewix 12'şer döndürüyor
+// Bu yüzden her Nuvio sayfası için 2 Sinewix sayfası çekiyoruz
+async function fetchSinewixPages(type, nuvioSkip) {
+  // nuvioSkip=0  → sinewixSkip 0 ve 12
+  // nuvioSkip=24 → sinewixSkip 24 ve 36
+  // nuvioSkip=48 → sinewixSkip 48 ve 60 ...
+  const sinewixSkip1 = nuvioSkip;
+  const sinewixSkip2 = nuvioSkip + 12;
+
+  const [page1, page2] = await Promise.all([
+    fetchSinewixPage(type, sinewixSkip1),
+    fetchSinewixPage(type, sinewixSkip2),
+  ]);
+
+  const combined = [...page1, ...page2];
+  console.log(`[Sinewix] Combined ${combined.length} items for nuvioSkip=${nuvioSkip}`);
+  return combined;
 }
 
 // TMDB'de başlık + yıl ile ara, IMDB ID döndür
@@ -78,7 +100,9 @@ async function getTmdbImdbId(name, type, year) {
 
   try {
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
-    const yearParam = year ? `&${type === 'movie' ? 'primary_release_year' : 'first_air_date_year'}=${year}` : '';
+    const yearParam = year
+      ? `&${type === 'movie' ? 'primary_release_year' : 'first_air_date_year'}=${year}`
+      : '';
     const searchRes = await fetch(
       `${TMDB_BASE}/search/${tmdbType}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(name)}&language=tr-TR${yearParam}`,
       { timeout: 8000 }
@@ -162,7 +186,9 @@ async function checkTurkishDub(name, type, year) {
     }
 
     const result = !!(hasInTR && hasTurkishTranslation);
-    console.log(`[DUB] "${name}" → TR provider: ${hasInTR}, TR trans: ${hasTurkishTranslation} → ${result ? '🇹🇷' : '❌'}`);
+    console.log(
+      `[DUB] "${name}" → TR provider: ${hasInTR}, TR trans: ${hasTurkishTranslation} → ${result ? '🇹🇷' : '❌'}`
+    );
 
     cache.set(cacheKey, result, 60 * 60 * 24);
     return result;
@@ -187,9 +213,25 @@ async function searchCinemeta(type, query) {
   }
 }
 
+// Paralel dublaj kontrolü — batchSize kadar eş zamanlı istek
+async function applyDubFlags(metas, type, batchSize = 10) {
+  const results = [];
+  for (let i = 0; i < metas.length; i += batchSize) {
+    const batch = metas.slice(i, i + batchSize);
+    const checked = await Promise.all(
+      batch.map(async (meta) => {
+        const year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
+        const hasTrDub = await checkTurkishDub(meta.name, type, year);
+        return hasTrDub ? { ...meta, name: `🇹🇷 ${meta.name}` } : meta;
+      })
+    );
+    results.push(...checked);
+  }
+  return results;
+}
+
 // CATALOG handler
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
-  // extra string veya number gelebilir, her ikisini de handle et
   const skip = parseInt(extra?.skip ?? '0') || 0;
   const searchQuery = extra?.search;
 
@@ -204,21 +246,13 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     const metas = await searchCinemeta(type, searchQuery);
     if (!metas.length) return { metas: [] };
 
-    const results = await Promise.all(
-      metas.map(async (meta) => {
-        const year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
-        const hasTrDub = await checkTurkishDub(meta.name, type, year);
-        if (hasTrDub) return { ...meta, name: `🇹🇷 ${meta.name}` };
-        return meta;
-      })
-    );
-
+    const results = await applyDubFlags(metas, type);
     const response = { metas: results };
     cache.set(cacheKey, response, 60 * 60 * 3);
     return response;
   }
 
-  // KATALOG modu — skip ile sayfalama
+  // KATALOG modu
   const cacheKey = `catalog:${type}:${skip}`;
   const cached = cache.get(cacheKey);
   if (cached) {
@@ -226,27 +260,14 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     return cached;
   }
 
-  const metas = await fetchSinewixPage(type, skip);
+  // Nuvio pageSize=24, Sinewix 12'şer döndürüyor → 2 sayfa çek
+  const metas = await fetchSinewixPages(type, skip);
   if (!metas.length) {
     console.log(`[Catalog] No metas returned for skip=${skip}`);
     return { metas: [] };
   }
 
-  // Paralel dublaj kontrolü (max 10 aynı anda)
-  const results = [];
-  const batchSize = 10;
-  for (let i = 0; i < metas.length; i += batchSize) {
-    const batch = metas.slice(i, i + batchSize);
-    const checked = await Promise.all(
-      batch.map(async (meta) => {
-        const year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
-        const hasTrDub = await checkTurkishDub(meta.name, type, year);
-        return hasTrDub ? { ...meta, name: `🇹🇷 ${meta.name}` } : meta;
-      })
-    );
-    results.push(...checked);
-  }
-
+  const results = await applyDubFlags(metas, type);
   const response = { metas: results };
   cache.set(cacheKey, response, 60 * 60 * 6);
   return response;
