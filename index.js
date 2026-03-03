@@ -276,6 +276,12 @@ async function searchCinemeta(type, query) {
 }
 
 // ── DUBLAJ BAYRAGI ────────────────────────────────────────────────────────────
+
+function fixPoster(url) {
+  if (!url) return url;
+  return url.replace('http://', 'https://');
+}
+
 async function applyDubFlags(metas, type, batchSize = 10) {
   const results = [];
   for (let i = 0; i < metas.length; i += batchSize) {
@@ -284,7 +290,11 @@ async function applyDubFlags(metas, type, batchSize = 10) {
       batch.map(async (meta) => {
         const year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
         const hasTrDub = await checkTurkishDub(meta.name, type, year);
-        return hasTrDub ? { ...meta, name: `🇹🇷 ${meta.name}` } : meta;
+        return {
+          ...(hasTrDub ? { ...meta, name: `🇹🇷 ${meta.name}` } : meta),
+          poster: fixPoster(meta.poster),      // ← HTTP → HTTPS
+          background: fixPoster(meta.background),
+        };
       })
     );
     results.push(...checked);
