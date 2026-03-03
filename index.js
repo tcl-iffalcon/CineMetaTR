@@ -8,7 +8,7 @@ const TMDB_BASE = 'https://api.themoviedb.org/3';
 const manifest = {
   id: 'org.trdub.addon',
   name: 'dublajtr',
-  version: '1.2.0',
+  version: '1.3.0',
   description: "Sinewix'teki Türkçe dublaj içeriklere 🇹🇷 bayrağı ekler.",
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Flag_of_Turkey.svg/320px-Flag_of_Turkey.svg.png',
   resources: ['catalog', 'meta'],
@@ -18,13 +18,19 @@ const manifest = {
       type: 'movie',
       id: 'tr-dub-sinewix-movies',
       name: '🇹🇷 Filmler (Türkçe Dublaj)',
-      extra: [{ name: 'skip' }, { name: 'search' }],
+      extra: [
+        { name: 'skip', isRequired: false },
+        { name: 'search', isRequired: false },
+      ],
     },
     {
       type: 'series',
       id: 'tr-dub-sinewix-series',
       name: '🇹🇷 Diziler (Türkçe Dublaj)',
-      extra: [{ name: 'skip' }, { name: 'search' }],
+      extra: [
+        { name: 'skip', isRequired: false },
+        { name: 'search', isRequired: false },
+      ],
     },
   ],
   idPrefixes: ['tt', 'sinewix'],
@@ -40,14 +46,21 @@ async function fetchSinewixPage(type, skip) {
     ? `${SINEWIX_BASE}/catalog/${sinewixType}/${catalogId}.json`
     : `${SINEWIX_BASE}/catalog/${sinewixType}/${catalogId}/skip=${skip}.json`;
 
+  console.log(`[Sinewix] Fetching: ${url}`);
+
   try {
     const res = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
-      timeout: 12000,
+      timeout: 15000,
     });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      console.error(`[Sinewix] HTTP ${res.status} for ${url}`);
+      return [];
+    }
     const data = await res.json();
-    return data.metas || [];
+    const metas = data.metas || [];
+    console.log(`[Sinewix] Got ${metas.length} items (skip=${skip})`);
+    return metas;
   } catch (err) {
     console.error(`[Sinewix] Fetch error (${type}, skip=${skip}):`, err.message);
     return [];
@@ -78,7 +91,6 @@ async function getTmdbImdbId(name, type, year) {
       return null;
     }
 
-    // TMDB ID'den external IDs al (IMDB ID için)
     const extRes = await fetch(
       `${TMDB_BASE}/${tmdbType}/${result.id}/external_ids?api_key=${TMDB_API_KEY}`,
       { timeout: 8000 }
@@ -113,7 +125,6 @@ async function checkTurkishDub(name, type, year) {
 
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
 
-    // TMDB ID bul
     const findRes = await fetch(
       `${TMDB_BASE}/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`,
       { timeout: 8000 }
@@ -130,7 +141,6 @@ async function checkTurkishDub(name, type, year) {
     }
     const tmdbId = results[0].id;
 
-    // Watch providers — TR'de var mı?
     const [providerRes, transRes] = await Promise.all([
       fetch(`${TMDB_BASE}/${tmdbType}/${tmdbId}/watch/providers?api_key=${TMDB_API_KEY}`, { timeout: 8000 }),
       fetch(`${TMDB_BASE}/${tmdbType}/${tmdbId}/translations?api_key=${TMDB_API_KEY}`, { timeout: 8000 }),
@@ -179,8 +189,11 @@ async function searchCinemeta(type, query) {
 
 // CATALOG handler
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
-  const skip = parseInt(extra?.skip) || 0;
+  // extra string veya number gelebilir, her ikisini de handle et
+  const skip = parseInt(extra?.skip ?? '0') || 0;
   const searchQuery = extra?.search;
+
+  console.log(`[Catalog] type=${type} id=${id} skip=${skip} search=${searchQuery || 'none'}`);
 
   // ARAMA modu
   if (searchQuery) {
@@ -205,13 +218,19 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     return response;
   }
 
-  // KATALOG modu
+  // KATALOG modu — skip ile sayfalama
   const cacheKey = `catalog:${type}:${skip}`;
   const cached = cache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    console.log(`[Catalog] Cache hit for ${cacheKey}`);
+    return cached;
+  }
 
   const metas = await fetchSinewixPage(type, skip);
-  if (!metas.length) return { metas: [] };
+  if (!metas.length) {
+    console.log(`[Catalog] No metas returned for skip=${skip}`);
+    return { metas: [] };
+  }
 
   // Paralel dublaj kontrolü (max 10 aynı anda)
   const results = [];
@@ -222,10 +241,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
       batch.map(async (meta) => {
         const year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
         const hasTrDub = await checkTurkishDub(meta.name, type, year);
-        if (hasTrDub) {
-          return { ...meta, name: `🇹🇷 ${meta.name}` };
-        }
-        return meta;
+        return hasTrDub ? { ...meta, name: `🇹🇷 ${meta.name}` } : meta;
       })
     );
     results.push(...checked);
@@ -238,7 +254,6 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
 // META handler
 builder.defineMetaHandler(async ({ type, id }) => {
-  // Sinewix meta'yı doğrudan Sinewix'ten çek
   try {
     const sinewixType = type === 'movie' ? 'movie' : 'series';
     const res = await fetch(`${SINEWIX_BASE}/meta/${sinewixType}/${id}.json`, {
