@@ -1,14 +1,23 @@
-const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
+const express = require('express');
 const fetch = require('node-fetch');
 const cache = require('./lib/cache');
 
 const SINEWIX_BASE = 'https://sinewix.onrender.com';
 const TMDB_BASE = 'https://api.themoviedb.org/3';
+const PORT = process.env.PORT || 7000;
 
+const app = express();
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', '*');
+  next();
+});
+
+// ── MANIFEST ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'org.trdub.addon',
   name: 'dublajtr',
-  version: '1.3.0',
+  version: '1.4.0',
   description: "Sinewix'teki Türkçe dublaj içeriklere 🇹🇷 bayrağı ekler.",
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Flag_of_Turkey.svg/320px-Flag_of_Turkey.svg.png',
   resources: ['catalog', 'meta'],
@@ -18,7 +27,6 @@ const manifest = {
       type: 'movie',
       id: 'tr-dub-sinewix-movies',
       name: '🇹🇷 Filmler (Türkçe Dublaj)',
-      pageSize: 24,
       extra: [
         { name: 'skip', isRequired: false },
         { name: 'search', isRequired: false },
@@ -28,7 +36,6 @@ const manifest = {
       type: 'series',
       id: 'tr-dub-sinewix-series',
       name: '🇹🇷 Diziler (Türkçe Dublaj)',
-      pageSize: 24,
       extra: [
         { name: 'skip', isRequired: false },
         { name: 'search', isRequired: false },
@@ -36,12 +43,100 @@ const manifest = {
     },
   ],
   idPrefixes: ['tt', 'sinewix'],
+  behaviorHints: { adult: false, p2p: false },
 };
 
-const builder = new addonBuilder(manifest);
+// ── ROUTES ────────────────────────────────────────────────────────────────────
+app.get('/', (req, res) => res.redirect('/manifest.json'));
+app.get('/manifest.json', (req, res) => res.json(manifest));
 
-// Sinewix sayfa başına 12 öğe döndürüyor
-// Bu fonksiyon istenen skip'ten itibaren 2 sayfa çekip 24 öğe döndürür
+app.get('/catalog/:type/:id/:extra.json', handleCatalog);
+app.get('/catalog/:type/:id.json', handleCatalog);
+app.get('/meta/:type/:id.json', handleMeta);
+
+// ── CATALOG HANDLER ───────────────────────────────────────────────────────────
+async function handleCatalog(req, res) {
+  const { type, id } = req.params;
+  const extraStr = req.params.extra || '';
+
+  let skip = 0;
+  let searchQuery = null;
+
+  if (extraStr) {
+    for (const part of extraStr.split('&')) {
+      const [k, v] = part.split('=');
+      if (k === 'skip') skip = parseInt(v) || 0;
+      if (k === 'search') searchQuery = decodeURIComponent(v || '');
+    }
+  }
+  if (req.query.skip) skip = parseInt(req.query.skip) || 0;
+  if (req.query.search) searchQuery = req.query.search;
+
+  console.log(`[Catalog] type=${type} id=${id} skip=${skip} search=${searchQuery || 'none'}`);
+
+  try {
+    if (searchQuery) {
+      const cacheKey = `search:${type}:${searchQuery}`;
+      const cached = cache.get(cacheKey);
+      if (cached) return res.json(cached);
+
+      const metas = await searchCinemeta(type, searchQuery);
+      if (!metas.length) return res.json({ metas: [] });
+
+      const results = await applyDubFlags(metas, type);
+      const response = { metas: results };
+      cache.set(cacheKey, response, 60 * 60 * 3);
+      return res.json(response);
+    }
+
+    const cacheKey = `catalog:${type}:${skip}`;
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      console.log(`[Catalog] Cache hit: ${cacheKey}`);
+      return res.json(cached);
+    }
+
+    const metas = await fetchSinewixPages(type, skip);
+    if (!metas.length) return res.json({ metas: [] });
+
+    const results = await applyDubFlags(metas, type);
+    const response = { metas: results };
+    cache.set(cacheKey, response, 60 * 60 * 6);
+    return res.json(response);
+  } catch (err) {
+    console.error('[Catalog] Error:', err.message);
+    return res.json({ metas: [] });
+  }
+}
+
+// ── META HANDLER ──────────────────────────────────────────────────────────────
+async function handleMeta(req, res) {
+  const { type, id } = req.params;
+  try {
+    const sinewixType = type === 'movie' ? 'movie' : 'series';
+    const r = await fetch(`${SINEWIX_BASE}/meta/${sinewixType}/${id}.json`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 10000,
+    });
+    if (!r.ok) return res.json({ meta: null });
+    const data = await r.json();
+    const meta = data.meta;
+    if (!meta) return res.json({ meta: null });
+
+    const year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
+    const hasTrDub = await checkTurkishDub(meta.name, type, year);
+    if (hasTrDub) {
+      meta.name = `🇹🇷 ${meta.name}`;
+      meta.description = `🇹🇷 Bu içerik Türkçe dublaj ile mevcut.\n\n${meta.description || ''}`;
+    }
+    return res.json({ meta });
+  } catch (err) {
+    console.error('[Meta] Error:', err.message);
+    return res.json({ meta: null });
+  }
+}
+
+// ── SİNEWİX ──────────────────────────────────────────────────────────────────
 async function fetchSinewixPage(type, sinewixSkip) {
   const sinewixType = type === 'movie' ? 'movie' : 'series';
   const catalogId = type === 'movie' ? 'sinewix-movies' : 'sinewix-series';
@@ -49,47 +144,32 @@ async function fetchSinewixPage(type, sinewixSkip) {
     ? `${SINEWIX_BASE}/catalog/${sinewixType}/${catalogId}.json`
     : `${SINEWIX_BASE}/catalog/${sinewixType}/${catalogId}/skip=${sinewixSkip}.json`;
 
-  console.log(`[Sinewix] Fetching: ${url}`);
-
+  console.log(`[Sinewix] GET ${url}`);
   try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
-      timeout: 15000,
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+      timeout: 20000,
     });
-    if (!res.ok) {
-      console.error(`[Sinewix] HTTP ${res.status} for ${url}`);
-      return [];
-    }
-    const data = await res.json();
+    if (!r.ok) { console.error(`[Sinewix] HTTP ${r.status}`); return []; }
+    const data = await r.json();
     const metas = data.metas || [];
-    console.log(`[Sinewix] Got ${metas.length} items (sinewixSkip=${sinewixSkip})`);
+    console.log(`[Sinewix] ${metas.length} items (skip=${sinewixSkip})`);
     return metas;
   } catch (err) {
-    console.error(`[Sinewix] Fetch error (${type}, sinewixSkip=${sinewixSkip}):`, err.message);
+    console.error(`[Sinewix] Error (skip=${sinewixSkip}):`, err.message);
     return [];
   }
 }
 
-// Nuvio pageSize=24 bekliyor, Sinewix 12'şer döndürüyor
-// Bu yüzden her Nuvio sayfası için 2 Sinewix sayfası çekiyoruz
 async function fetchSinewixPages(type, nuvioSkip) {
-  // nuvioSkip=0  → sinewixSkip 0 ve 12
-  // nuvioSkip=24 → sinewixSkip 24 ve 36
-  // nuvioSkip=48 → sinewixSkip 48 ve 60 ...
-  const sinewixSkip1 = nuvioSkip;
-  const sinewixSkip2 = nuvioSkip + 12;
-
-  const [page1, page2] = await Promise.all([
-    fetchSinewixPage(type, sinewixSkip1),
-    fetchSinewixPage(type, sinewixSkip2),
+  const [p1, p2] = await Promise.all([
+    fetchSinewixPage(type, nuvioSkip),
+    fetchSinewixPage(type, nuvioSkip + 12),
   ]);
-
-  const combined = [...page1, ...page2];
-  console.log(`[Sinewix] Combined ${combined.length} items for nuvioSkip=${nuvioSkip}`);
-  return combined;
+  return [...p1, ...p2];
 }
 
-// TMDB'de başlık + yıl ile ara, IMDB ID döndür
+// ── TMDB ──────────────────────────────────────────────────────────────────────
 async function getTmdbImdbId(name, type, year) {
   const TMDB_API_KEY = process.env.TMDB_API_KEY;
   if (!TMDB_API_KEY) return null;
@@ -103,27 +183,23 @@ async function getTmdbImdbId(name, type, year) {
     const yearParam = year
       ? `&${type === 'movie' ? 'primary_release_year' : 'first_air_date_year'}=${year}`
       : '';
-    const searchRes = await fetch(
+    const r = await fetch(
       `${TMDB_BASE}/search/${tmdbType}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(name)}&language=tr-TR${yearParam}`,
       { timeout: 8000 }
     );
-    if (!searchRes.ok) return null;
-    const searchData = await searchRes.json();
-    const result = searchData.results?.[0];
-    if (!result) {
-      cache.set(cacheKey, null, 60 * 60 * 24);
-      return null;
-    }
+    if (!r.ok) return null;
+    const d = await r.json();
+    const result = d.results?.[0];
+    if (!result) { cache.set(cacheKey, null, 86400); return null; }
 
-    const extRes = await fetch(
+    const extR = await fetch(
       `${TMDB_BASE}/${tmdbType}/${result.id}/external_ids?api_key=${TMDB_API_KEY}`,
       { timeout: 8000 }
     );
-    if (!extRes.ok) return null;
-    const extData = await extRes.json();
-    const imdbId = extData.imdb_id || null;
-
-    cache.set(cacheKey, imdbId, 60 * 60 * 24);
+    if (!extR.ok) return null;
+    const extD = await extR.json();
+    const imdbId = extD.imdb_id || null;
+    cache.set(cacheKey, imdbId, 86400);
     return imdbId;
   } catch (err) {
     console.error(`[TMDB] Search error (${name}):`, err.message);
@@ -131,7 +207,6 @@ async function getTmdbImdbId(name, type, year) {
   }
 }
 
-// Türkçe dublaj kontrolü
 async function checkTurkishDub(name, type, year) {
   const cacheKey = `dub:${type}:${name}`;
   const cached = cache.get(cacheKey);
@@ -142,78 +217,65 @@ async function checkTurkishDub(name, type, year) {
 
   try {
     const imdbId = await getTmdbImdbId(name, type, year);
-    if (!imdbId) {
-      cache.set(cacheKey, false, 60 * 60 * 12);
-      return false;
-    }
+    if (!imdbId) { cache.set(cacheKey, false, 43200); return false; }
 
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
-
-    const findRes = await fetch(
+    const findR = await fetch(
       `${TMDB_BASE}/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`,
       { timeout: 8000 }
     );
-    if (!findRes.ok) {
-      cache.set(cacheKey, false, 60 * 60 * 1);
-      return false;
-    }
-    const findData = await findRes.json();
-    const results = type === 'movie' ? findData.movie_results : findData.tv_results;
-    if (!results?.length) {
-      cache.set(cacheKey, false, 60 * 60 * 12);
-      return false;
-    }
+    if (!findR.ok) { cache.set(cacheKey, false, 3600); return false; }
+    const findD = await findR.json();
+    const results = type === 'movie' ? findD.movie_results : findD.tv_results;
+    if (!results?.length) { cache.set(cacheKey, false, 43200); return false; }
     const tmdbId = results[0].id;
 
-    const [providerRes, transRes] = await Promise.all([
+    const [provR, transR] = await Promise.all([
       fetch(`${TMDB_BASE}/${tmdbType}/${tmdbId}/watch/providers?api_key=${TMDB_API_KEY}`, { timeout: 8000 }),
       fetch(`${TMDB_BASE}/${tmdbType}/${tmdbId}/translations?api_key=${TMDB_API_KEY}`, { timeout: 8000 }),
     ]);
 
     let hasInTR = false;
-    if (providerRes.ok) {
-      const pd = await providerRes.json();
+    if (provR.ok) {
+      const pd = await provR.json();
       const trP = pd.results?.TR;
       hasInTR = !!(trP?.flatrate || trP?.buy || trP?.free || trP?.ads);
     }
 
     let hasTurkishTranslation = false;
-    if (transRes.ok) {
-      const td = await transRes.json();
+    if (transR.ok) {
+      const td = await transR.json();
       hasTurkishTranslation = td.translations?.some(
         (t) => t.iso_639_1 === 'tr' && (t.data?.title || t.data?.name || t.data?.overview)
       );
     }
 
     const result = !!(hasInTR && hasTurkishTranslation);
-    console.log(
-      `[DUB] "${name}" → TR provider: ${hasInTR}, TR trans: ${hasTurkishTranslation} → ${result ? '🇹🇷' : '❌'}`
-    );
-
-    cache.set(cacheKey, result, 60 * 60 * 24);
+    console.log(`[DUB] "${name}" → hasInTR:${hasInTR} hasTrans:${hasTurkishTranslation} → ${result ? '🇹🇷' : '❌'}`);
+    cache.set(cacheKey, result, 86400);
     return result;
   } catch (err) {
     console.error(`[DUB] Error (${name}):`, err.message);
-    cache.set(cacheKey, false, 60 * 60 * 1);
+    cache.set(cacheKey, false, 3600);
     return false;
   }
 }
 
-// Cinemeta'da arama yap
+// ── CİNEMETA ─────────────────────────────────────────────────────────────────
 async function searchCinemeta(type, query) {
   try {
     const url = `https://v3-cinemeta.strem.io/catalog/${type}/top/search=${encodeURIComponent(query)}.json`;
-    const res = await fetch(url, { timeout: 10000 });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.metas || [];
+    const r = await fetch(url, { timeout: 10000 });
+    if (!r.ok) return [];
+    const d = await r.json();
+    return d.metas || [];
   } catch (err) {
-    console.error('[Cinemeta] Search error:', err.message);
+    console.error('[Cinemeta] Error:', err.message);
     return [];
   }
 }
 
-// Paralel dublaj kontrolü — batchSize kadar eş zamanlı istek
+// ── DUBLAJ BAYRAGI ────────────────────────────────────────────────────────────
 async function applyDubFlags(metas, type, batchSize = 10) {
   const results = [];
   for (let i = 0; i < metas.length; i += batchSize) {
@@ -230,76 +292,8 @@ async function applyDubFlags(metas, type, batchSize = 10) {
   return results;
 }
 
-// CATALOG handler
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
-  const skip = parseInt(extra?.skip ?? '0') || 0;
-  const searchQuery = extra?.search;
-
-  console.log(`[Catalog] type=${type} id=${id} skip=${skip} search=${searchQuery || 'none'}`);
-
-  // ARAMA modu
-  if (searchQuery) {
-    const cacheKey = `search:${type}:${searchQuery}`;
-    const cached = cache.get(cacheKey);
-    if (cached) return cached;
-
-    const metas = await searchCinemeta(type, searchQuery);
-    if (!metas.length) return { metas: [] };
-
-    const results = await applyDubFlags(metas, type);
-    const response = { metas: results };
-    cache.set(cacheKey, response, 60 * 60 * 3);
-    return response;
-  }
-
-  // KATALOG modu
-  const cacheKey = `catalog:${type}:${skip}`;
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    console.log(`[Catalog] Cache hit for ${cacheKey}`);
-    return cached;
-  }
-
-  // Nuvio pageSize=24, Sinewix 12'şer döndürüyor → 2 sayfa çek
-  const metas = await fetchSinewixPages(type, skip);
-  if (!metas.length) {
-    console.log(`[Catalog] No metas returned for skip=${skip}`);
-    return { metas: [] };
-  }
-
-  const results = await applyDubFlags(metas, type);
-  const response = { metas: results };
-  cache.set(cacheKey, response, 60 * 60 * 6);
-  return response;
+// ── BAŞLAT ────────────────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`🇹🇷 TR Dub Addon çalışıyor: http://localhost:${PORT}`);
+  console.log(`   Manifest: http://localhost:${PORT}/manifest.json`);
 });
-
-// META handler
-builder.defineMetaHandler(async ({ type, id }) => {
-  try {
-    const sinewixType = type === 'movie' ? 'movie' : 'series';
-    const res = await fetch(`${SINEWIX_BASE}/meta/${sinewixType}/${id}.json`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 10000,
-    });
-    if (!res.ok) return { meta: null };
-    const data = await res.json();
-    const meta = data.meta;
-    if (!meta) return { meta: null };
-
-    const year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
-    const hasTrDub = await checkTurkishDub(meta.name, type, year);
-    if (hasTrDub) {
-      meta.name = `🇹🇷 ${meta.name}`;
-      meta.description = `🇹🇷 Bu içerik Türkçe dublaj ile mevcut.\n\n${meta.description || ''}`;
-    }
-
-    return { meta };
-  } catch (err) {
-    console.error('[Meta] Error:', err.message);
-    return { meta: null };
-  }
-});
-
-const port = process.env.PORT || 7000;
-serveHTTP(builder.getInterface(), { port });
-console.log(`🇹🇷 TR Dub Addon çalışıyor: http://localhost:${port}`);
