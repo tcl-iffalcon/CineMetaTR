@@ -17,8 +17,8 @@ app.use((req, res, next) => {
 const manifest = {
   id: 'org.trdub.addon',
   name: 'DublajTR',
-  version: '1.3.0',
-  description: "Sinewix'teki Türkçe dublaj içeriklere 🇹🇷 bayrağı ekler.",
+  version: '1.3.1',
+  description: "Nuvio'da Sinewix'teki Türkçe dublaj içeriklere 🇹🇷 bayrağı ekler.",
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Flag_of_Turkey.svg/320px-Flag_of_Turkey.svg.png',
   resources: ['catalog', 'meta'],
   types: ['movie', 'series'],
@@ -53,6 +53,12 @@ app.get('/manifest.json', (req, res) => res.json(manifest));
 app.get('/catalog/:type/:id/:extra.json', handleCatalog);
 app.get('/catalog/:type/:id.json', handleCatalog);
 app.get('/meta/:type/:id.json', handleMeta);
+
+// ── POSTER HTTP → HTTPS ───────────────────────────────────────────────────────
+function fixPoster(url) {
+  if (!url) return url;
+  return url.replace('http://', 'https://');
+}
 
 // ── CATALOG HANDLER ───────────────────────────────────────────────────────────
 async function handleCatalog(req, res) {
@@ -122,6 +128,10 @@ async function handleMeta(req, res) {
     const data = await r.json();
     const meta = data.meta;
     if (!meta) return res.json({ meta: null });
+
+    // Poster ve background HTTP → HTTPS
+    meta.poster = fixPoster(meta.poster);
+    meta.background = fixPoster(meta.background);
 
     const year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
     const hasTrDub = await checkTurkishDub(meta.name, type, year);
@@ -276,12 +286,6 @@ async function searchCinemeta(type, query) {
 }
 
 // ── DUBLAJ BAYRAGI ────────────────────────────────────────────────────────────
-
-function fixPoster(url) {
-  if (!url) return url;
-  return url.replace('http://', 'https://');
-}
-
 async function applyDubFlags(metas, type, batchSize = 10) {
   const results = [];
   for (let i = 0; i < metas.length; i += batchSize) {
@@ -292,7 +296,7 @@ async function applyDubFlags(metas, type, batchSize = 10) {
         const hasTrDub = await checkTurkishDub(meta.name, type, year);
         return {
           ...(hasTrDub ? { ...meta, name: `🇹🇷 ${meta.name}` } : meta),
-          poster: fixPoster(meta.poster),      // ← HTTP → HTTPS
+          poster: fixPoster(meta.poster),
           background: fixPoster(meta.background),
         };
       })
